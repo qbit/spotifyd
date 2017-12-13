@@ -13,7 +13,6 @@ extern crate futures;
 extern crate tokio_core;
 extern crate tokio_io;
 extern crate tokio_signal;
-extern crate alsa;
 
 use std::process::exit;
 use std::panic;
@@ -23,14 +22,15 @@ use std::path::PathBuf;
 use std::io;
 
 use librespot::spirc::{Spirc, SpircTask};
-use librespot::session::{Session, Config as SessionConfig};
+use librespot::core::session::Session;
+use librespot::core::config::{PlayerConfig, SessionConfig, ConnectConfig};
 use librespot::player::Player;
 use librespot::audio_backend::{BACKENDS, Sink};
-use librespot::authentication::get_credentials;
-use librespot::authentication::discovery::{discovery, DiscoveryStream};
+use librespot::core::authentication::get_credentials;
+use librespot::discovery::{discovery, DiscoveryStream};
 use librespot::mixer;
 use librespot::mixer::Mixer;
-use librespot::cache::Cache;
+use librespot::core::cache::Cache;
 
 use daemonize::Daemonize;
 use futures::{Future, Async, Poll, Stream};
@@ -38,9 +38,10 @@ use tokio_core::reactor::{Handle, Core};
 use tokio_io::IoStream;
 use tokio_signal::ctrl_c;
 
+//mod session_config;
+//mod player_config;
 mod config;
 mod cli;
-mod alsa_mixer;
 
 
 struct MainLoopState {
@@ -53,7 +54,9 @@ struct MainLoopState {
     ctrl_c_stream: IoStream<()>,
     shutting_down: bool,
     cache: Option<Cache>,
-    config: SessionConfig,
+    session_config: SessionConfig,
+    player_config: PlayerConfig,
+    connect_config: ConnectConfig,
     device_name: String,
     handle: Handle,
     discovery_stream: DiscoveryStream,
@@ -68,7 +71,9 @@ impl MainLoopState {
         ctrl_c_stream: IoStream<()>,
         discovery_stream: DiscoveryStream,
         cache: Option<Cache>,
-        config: SessionConfig,
+        session_config: SessionConfig,
+        player_config: PlayerConfig,
+        connect_config: ConnectConfig,
         device_name: String,
         handle: Handle,
     ) -> MainLoopState {
@@ -82,7 +87,9 @@ impl MainLoopState {
             ctrl_c_stream: ctrl_c_stream,
             shutting_down: false,
             cache: cache,
-            config: config,
+            session_config: session_config,
+            player_config: player_config,
+            connect_config: connect_config,
             device_name: device_name,
             handle: handle,
             discovery_stream: discovery_stream,
@@ -101,10 +108,10 @@ impl Future for MainLoopState {
                 if let Some(ref mut spirc) = self.spirc {
                     spirc.shutdown();
                 }
-                let config = self.config.clone();
+                let s_config = self.session_config.clone();
                 let cache = self.cache.clone();
                 let handle = self.handle.clone();
-                self.connection = Session::connect(config, creds, cache, handle);
+                self.connection = Session::connect(s_config, creds, cache, handle);
             }
 
             if let Async::Ready(session) = self.connection.poll().unwrap() {
@@ -113,14 +120,17 @@ impl Future for MainLoopState {
                 self.connection = Box::new(futures::future::empty());
                 let backend = self.backend;
                 let audio_device = self.audio_device.clone();
+                let player_config = self.player_config.clone();
+                let connect_config = self.connect_config.clone();
                 let player = Player::new(
+                    player_config,
                     session.clone(),
                     audio_filter,
                     move || (backend)(audio_device),
                 );
 
                 let (spirc, spirc_task) =
-                    Spirc::new(self.device_name.clone(), session, player, mixer);
+                    Spirc::new(connect_config, session, player, mixer);
                 self.spirc_task = Some(spirc_task);
                 self.spirc = Some(spirc);
             } else if let Async::Ready(_) = self.ctrl_c_stream.poll().unwrap() {
@@ -227,10 +237,11 @@ fn main() {
 
     let cache = config.cache;
     let session_config = config.session_config;
+    let player_config = config.player_config.clone();
     let backend = config.backend.clone();
     let audio_device = config.audio_device.clone();
     let device_id = session_config.device_id.clone();
-    let discovery_stream = discovery(&handle, config.device_name.clone(), device_id).unwrap();
+    let connect_config = config.connect_config.clone();
     let connection = if let Some(credentials) =
         get_credentials(
             config.username.or(matches.opt_str("username")),
@@ -248,17 +259,10 @@ fn main() {
         Box::new(futures::future::empty()) as
             Box<futures::Future<Item = Session, Error = io::Error>>
     };
+    let discovery_stream = discovery(&handle, connect_config.clone(), device_id).unwrap();
 
-    let local_audio_device = audio_device.clone();
+    // let local_audio_device = audio_device.clone();
     let mixer = match config.volume_controller {
-        config::VolumeController::Alsa => {
-            info!("Using alsa volume controller.");
-            Box::new(move || {
-                Box::new(alsa_mixer::AlsaMixer(
-                    local_audio_device.clone().unwrap_or("default".to_string()),
-                )) as Box<Mixer>
-            }) as Box<FnMut() -> Box<Mixer>>
-        }
         config::VolumeController::SoftVol => {
             info!("Using software volume controller.");
             Box::new(|| {
@@ -277,6 +281,8 @@ fn main() {
         discovery_stream,
         cache,
         session_config,
+        player_config,
+        connect_config,
         config.device_name.clone(),
         handle,
     );

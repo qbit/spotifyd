@@ -5,9 +5,10 @@ use std::fs::metadata;
 use std::mem::swap;
 use std::str::FromStr;
 
-use librespot::session::{Bitrate, Config as SessionConfig, device_id};
-use librespot::cache::Cache;
-use librespot::version;
+use librespot::core::session::{device_id};
+use librespot::core::config::{Bitrate, DeviceType, SessionConfig, PlayerConfig, ConnectConfig};
+use librespot::core::cache::Cache;
+use librespot::core::version;
 
 use xdg;
 use ini::Ini;
@@ -18,7 +19,6 @@ use hostname;
 const CONFIG_FILE: &'static str = "spotifyd.conf";
 
 pub enum VolumeController {
-    Alsa,
     SoftVol,
 }
 
@@ -26,7 +26,6 @@ impl FromStr for VolumeController {
     type Err = ();
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match &*s.to_uppercase() {
-            "ALSA" => Ok(VolumeController::Alsa),
             "SOFTVOL" => Ok(VolumeController::SoftVol),
             _ => Err(()),
         }
@@ -42,6 +41,8 @@ pub struct SpotifydConfig {
     pub volume_controller: VolumeController,
     pub device_name: String,
     pub session_config: SessionConfig,
+    pub player_config: PlayerConfig,
+    pub connect_config: ConnectConfig,
 }
 
 impl Default for SpotifydConfig {
@@ -55,11 +56,17 @@ impl Default for SpotifydConfig {
             volume_controller: VolumeController::SoftVol,
             device_name: "Spotifyd".to_string(),
             session_config: SessionConfig {
-                bitrate: Bitrate::Bitrate160,
                 user_agent: version::version_string(),
+                device_id: device_id("Spotifyd"),
+            },
+            player_config: PlayerConfig {
+                bitrate: Bitrate::default(),
                 onstart: None,
                 onstop: None,
-                device_id: device_id("Spotifyd"),
+            },
+            connect_config: ConnectConfig {
+                name: "Spotifyd".to_string(),
+                device_type: DeviceType::default(),
             },
         }
     }
@@ -143,10 +150,10 @@ pub fn get_config<P: AsRef<Path>>(config_path: Option<P>, matches: &Matches) -> 
         } else {
             "Spotifyd".to_string()
         });
-    config.session_config.onstart = lookup("onstart");
-    config.session_config.onstop = lookup("onstop");
+    config.player_config.onstart = lookup("onstart");
+    config.player_config.onstop = lookup("onstop");
     update(
-        &mut config.session_config.bitrate,
+        &mut config.player_config.bitrate,
         lookup("bitrate").and_then(|s| Bitrate::from_str(&*s).ok()),
     );
     update(&mut config.session_config.device_id, lookup("device_name"));
